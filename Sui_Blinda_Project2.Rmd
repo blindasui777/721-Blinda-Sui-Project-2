@@ -6,25 +6,255 @@ output: word_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE
+)
 ```
 
-## R Markdown
+## Data cleaning
+```{r}
+library(tidyverse)
+library(lubridate)
+library(knitr)
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+clean_air <- function(file_path, o3_unit = "ppm") {
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+  o3_unit <- match.arg(o3_unit, c("ppm", "ppb"))
 
-```{r cars}
-summary(cars)
+  data <- read_csv(file_path, show_col_types = FALSE) %>%
+
+    # Remove exact duplicate rows
+    distinct() %>%
+
+    # Rename variables and convert dates
+    transmute(
+      date = mdy(Date),
+      co = `Daily Max 8-hour CO Concentration`,
+      pm25 = `Daily Mean PM2.5 Concentration`,
+      o3 = `Daily Max 8-hour Ozone Concentration`
+    ) %>%
+
+    # Replace negative concentrations with zero
+    mutate(across(c(co, pm25, o3),
+                  ~ if_else(!is.na(.x) & .x < 0,
+                            0, .x))) %>%
+
+    # Calculate one average per day
+    group_by(date) %>%
+    summarise(
+      across(
+        c(co, pm25, o3),
+        ~ if (all(is.na(.x))) NA_real_ else mean(.x, na.rm = TRUE)
+        ),
+      .groups = "drop"
+      )
+
+  # Convert ozone to ppb when requested
+  if (o3_unit == "ppb") {
+    data <- data %>% mutate(o3 = o3 * 1000)
+  }
+
+  return(data)
+}
+```
+The air quality datasets were cleaned by removing duplicate records, converting dates, replacing negative pollutant concentrations with zero, and calculating daily averages for repeated measurements.
+
+## Process and combine all three datasets
+```{r}
+aq2018 <- clean_air("721_Project2_Data/AQ_2018.csv")
+aq2019 <- clean_air("721_Project2_Data/AQ_2019.csv")
+aq2020 <- clean_air("721_Project2_Data/AQ_2020.csv")
+
+aq_all <- bind_rows(aq2018, aq2019, aq2020) %>%
+  arrange(date) %>%
+  mutate(
+    year = year(date),
+    month = month(date)
+  )
+```
+```{r, include=FALSE}
+# Check the cleaned dataset
+glimpse(aq_all)
+```
+The cleaned datasets from 2018, 2019, and 2020 were combined into a single dataset containing 847 daily observations for subsequent analysis.
+
+## Tables
+```{r}
+make_table <- function(data, selected_year) {
+
+  data %>%
+    filter(year == selected_year) %>%
+    summarise(
+      across(c(co, pm25, o3),
+             list(
+               Min = ~ min(.x, na.rm = TRUE),
+               Max = ~ max(.x, na.rm = TRUE)
+             ))
+    ) %>%
+    pivot_longer(
+      everything(),
+      names_to = c("Pollutant", ".value"),
+      names_sep = "_"
+    ) %>%
+    mutate(
+      Pollutant = recode(
+        Pollutant,
+        co = "CO (ppm)",
+        pm25 = "PM2.5 (ug/m3)",
+        o3 = "O3 (ppm)"
+      )
+    ) %>%
+    mutate(
+      across(c(Min, Max), ~ sprintf("%.3f", .x))
+      ) %>%
+    knitr::kable(
+      digits = 3,
+      caption = paste(
+        "Minimum and Maximum Daily Concentrations,",
+        selected_year
+      )
+    )
+}
+
+make_table(aq_all, 2018)
+make_table(aq_all, 2019)
+make_table(aq_all, 2020)
 ```
 
-## Including Plots
 
-You can also embed plots, for example:
+## Plot 1: CO and O3 by month.
+```{r}
+# Calculating monthly means and CI
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+plot1_data <- aq_all %>%
+  select(month, co, o3) %>%
+  pivot_longer(
+    cols = c(co, o3),
+    names_to = "pollutant",
+    values_to = "concentration"
+  ) %>%
+  group_by(month, pollutant) %>%
+  summarise(
+    n = sum(!is.na(concentration)),
+    mean = mean(concentration, na.rm = TRUE),
+    sd = sd(concentration, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    lower = mean - 1.96 * sd / sqrt(n),
+    upper = mean + 1.96 * sd / sqrt(n),
+    pollutant = recode(
+      pollutant,
+      co = "CO (ppm)",
+      o3 = "O3 (ppm)"
+    )
+  )
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{r}
+# Creating the Plot
+
+ggplot(plot1_data,
+       aes(x = month, y = mean,
+           color = pollutant)) +
+  geom_point(size = 2.5) +
+  geom_errorbar(
+    aes(ymin = lower, ymax = upper),
+    width = 0.2
+  ) +
+  facet_wrap(~ pollutant, scales = "free_y") +
+  scale_x_continuous(
+    breaks = 1:12,
+    labels = month.abb,
+    guide = guide_axis(angle = 45)
+    ) +
+  scale_color_manual(
+    values = c(
+      "CO (ppm)" = "#D77A9D",
+      "O3 (ppm)" = "#3977A8"
+    )
+  ) +
+  labs(
+    title = "Monthly CO and O3 Concentrations",
+    subtitle = "Pooled daily observations, 2018–2020",
+    x = "Month",
+    y = "Monthly Mean Concentration",
+    color = "Pollutant"
+  ) +
+    theme_minimal() +
+  theme(
+    axis.text.x = element_text(
+      angle = 60,
+      hjust = 1,
+      size = 8
+    ),
+    legend.position = "none"
+  )
+```
+
+CO and O3 are displayed in separate panels with independent y-axis scales because their concentrations differ substantially. This allows the monthly patterns and confidence intervals for both pollutants to be clearly visible.
+
+## Plot 2: PM2.5 by month and year
+```{r}
+# Calculating the monthly PM2.5 averages separately for each year
+
+plot2_data <- aq_all %>%
+  group_by(year, month) %>%
+  summarise(
+    mean_pm25 = mean(pm25, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r}
+# Create the plot
+
+ggplot(plot2_data,
+       aes(x = month,
+           y = mean_pm25,
+           color = factor(year),
+           group = year)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2.5) +
+  scale_x_continuous(
+    breaks = 1:12,
+    labels = month.abb
+  ) +
+  scale_color_manual(
+    values = c(
+      "2018" = "#D77A9D",
+      "2019" = "#3977A8",
+      "2020" = "#55A68C"
+    )
+  ) +
+  labs(
+    title = "Monthly PM2.5 Concentrations by Year",
+    x = "Month",
+    y = "Mean PM2.5 (ug/m3)",
+    color = "Year"
+  ) +
+  theme_minimal()
+```
+
+I used a line plot with points because it clearly displays monthly trends and makes it easy to compare PM2.5 concentrations across the three years.
+
+
+## Interpretation
+
+CO concentrations tended to be higher during late fall and winter, while O3 concentrations were generally higher in spring and summer. PM2.5 concentrations varied across years, with relatively high values in summer and December 2018 and early 2019. Since the 2020 dataset only includes January through April, comparisons for the remaining months are limited to 2018 and 2019.
+
+
+## AI Use Statement
+
+I used ChatGPT to help organize my R Markdown report, develop the data-cleaning function, and create the summary tables and visualizations. I reviewed the code against the project instructions, revised the code, and checked the results using RStudio.
+
+
+
+
+
+
+
+
+

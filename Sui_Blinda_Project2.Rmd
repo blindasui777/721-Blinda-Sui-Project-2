@@ -250,7 +250,8 @@ CO concentrations tended to be higher during late fall and winter, while O3 conc
 
 I used ChatGPT to help organize my R Markdown report, develop the data-cleaning function, and create the summary tables and visualizations. I reviewed the code against the project instructions, revised the code, and checked the results using RStudio.
 
-
+## GitHub Link
+https://github.com/blindasui777/721-Blinda-Sui-Project-2.git
 
 
 
